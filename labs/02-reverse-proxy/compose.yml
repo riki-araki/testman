@@ -1,0 +1,49 @@
+# ラボ02: nginx リバースプロキシ + ロードバランシング
+#
+#   client ──▶ proxy (nginx) ──┬──▶ app1 (whoami)
+#                              └──▶ app2 (whoami)
+#
+# AWS で言えば「ALB → ターゲットグループ (EC2 x2)」の構成。
+
+services:
+  proxy:
+    image: nginx:1.27-alpine
+    hostname: proxy
+    # ブラウザから http://127.0.0.1:8002 でも確認できる (自分の PC からのみ)
+    ports:
+      - "127.0.0.1:8002:80"
+    volumes:
+      # 設定は .runtime/02-reverse-proxy/nginx/ にコピーされる。直接編集して OK
+      - ${LAB_RUNTIME:?lab コマンド経由で起動してください}/nginx:/etc/nginx/conf.d
+    depends_on:
+      app1:
+        condition: service_started
+      app2:
+        condition: service_started
+    networks: [web]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 2s
+      retries: 10
+
+  app1:
+    image: traefik/whoami:v1.10
+    hostname: app1
+    networks: [web]
+
+  app2:
+    image: traefik/whoami:v1.10
+    hostname: app2
+    networks: [web]
+
+  client:
+    image: nicolaka/netshoot:v0.13
+    hostname: client
+    command: ["sleep", "infinity"]
+    networks: [web]
+
+networks:
+  web:
+    ipam:
+      config:
+        - subnet: 10.102.0.0/24

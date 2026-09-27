@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: make lint
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker version
+        run: docker version && docker compose version
+      - name: Pull images
+        run: |
+          docker pull nicolaka/netshoot:v0.13
+          docker pull nginx:1.27-alpine
+          docker pull traefik/whoami:v1.10
+      - name: Run all labs (start → check → break → check)
+        run: make test

@@ -1,0 +1,6 @@
+# ラボ実行中の作業ファイルと個人の進捗
+.runtime/
+.progress
+
+# 公開したくない個人メモ
+journal/private/

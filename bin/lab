@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# lab - 壊して直すインフラ学習ラボの CLI
+set -euo pipefail
+
+LAB_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+LABS_DIR="$LAB_ROOT/labs"
+RUNTIME_ROOT="$LAB_ROOT/.runtime"
+PROGRESS_FILE="$LAB_ROOT/.progress"
+export LAB_ROOT
+
+# shellcheck source=../lib/common.sh
+source "$LAB_ROOT/lib/common.sh"
+
+usage() {
+  cat <<EOF
+使い方: lab <コマンド> [引数]
+
+  list                     ラボ一覧と進捗を表示
+  start  <lab>             ラボを起動 (<lab> は "01" や "01-routing")
+  mission <lab>            課題文 (MISSION.md) を表示
+  break  <lab> [番号]      障害を発生させる (番号を省略するとランダム)
+  check  <lab>             直せたか / 構築できたかを判定
+  hint   <lab> [番号]      ヒントを表示 (番号を省略すると 1 つ目)
+  shell  <lab> <service>   コンテナに入る
+  status <lab>             コンテナの状態を表示
+  logs   <lab> [service]   ログを表示
+  dc     <lab> <args...>   docker compose をこのラボに対して実行 (例: lab dc 02 restart app2)
+  reset  <lab>             ラボを初期状態に戻す (stop → start)
+  stop   <lab>             ラボを停止して片付ける
+  progress                 クリア状況を表示
+EOF
+}
+
+# ---- ラボの解決 ------------------------------------------------------------
+
+resolve_lab() {
+  local query="${1:-}"
+  [ -n "$query" ] || die "ラボを指定してください (例: lab start 01)"
+  local matches=()
+  local d
+  for d in "$LABS_DIR"/*/; do
+    d="$(basename "$d")"
+    [[ "$d" == _* ]] && continue
+    if [ "$d" = "$query" ] || [[ "$d" == "$query"-* ]]; then
+      matches+=("$d")
+    fi
+  done
+  case "${#matches[@]}" in
+    1) echo "${matches[0]}" ;;
+    0) die "ラボが見つかりません: $query (lab list で一覧を確認)" ;;
+    *) die "複数のラボに一致しました: ${matches[*]}" ;;
+  esac
+}
+
+# LAB_ID などの環境変数をセットする
+load_lab() {
+  LAB_ID="$(resolve_lab "$1")"
+  LAB_DIR="$LABS_DIR/$LAB_ID"
+  LAB_PROJECT="lab-${LAB_ID%%-*}"
+  LAB_RUNTIME="$RUNTIME_ROOT/$LAB_ID"
+  export LAB_ID LAB_DIR LAB_PROJECT LAB_RUNTIME
+  TITLE="" LEVEL="" TYPE="break-fix"
+  # shellcheck source=/dev/null
+  source "$LAB_DIR/lab.conf"
+}
+
+is_running() {
+  [ -n "$(dc ps -q 2>/dev/null)" ]
+}
+
+require_running() {
+  is_running || die "ラボ $LAB_ID は起動していません (lab start ${LAB_ID%%-*})"
+}
+
+# ---- 進捗 -------------------------------------------------------------------
+
+progress_has() {
+  [ -f "$PROGRESS_FILE" ] && grep -qx "$1" "$PROGRESS_FILE"
+}
+
+progress_add() {
+  progress_has "$1" && return 0
+  echo "$1" >>"$PROGRESS_FILE"
+}
+
+progress_mark() {
+  local id="$1" type="$2"
+  if [ "$type" = "build" ]; then
+    progress_has "$id:built" && printf '%s✔%s' "$C_GREEN" "$C_RESET" && return
+  else
+    progress_has "$id:fixed" && printf '%s✔%s' "$C_GREEN" "$C_RESET" && return
+  fi
+  printf ' '
+}
+
+# ---- コマンド ---------------------------------------------------------------
+
+cmd_list() {
+  local d
+  printf '%s   %-22s %-8s %-10s %s\n' ' ' 'LAB' 'LEVEL' 'TYPE' 'TITLE'
+  for d in "$LABS_DIR"/*/; do
+    d="$(basename "$d")"
+    [[ "$d" == _* ]] && continue
+    TITLE="" LEVEL="" TYPE="break-fix"
+    # shellcheck source=/dev/null
+    source "$LABS_DIR/$d/lab.conf"
+    printf '%s   %-22s %-8s %-10s %s\n' "$(progress_mark "$d" "$TYPE")" "$d" "$LEVEL" "$TYPE" "$TITLE"
+  done
+}
+
+cmd_start() {
+  load_lab "$1"
+  if is_running; then
+    warn "ラボ $LAB_ID は既に起動しています (やり直すなら lab reset ${LAB_ID%%-*})"
+    return 0
+  fi
+  rm -rf "$LAB_RUNTIME"
+  mkdir -p "$LAB_RUNTIME"
+  if [ -d "$LAB_DIR/files" ]; then
+    cp -R "$LAB_DIR/files/." "$LAB_RUNTIME/"
+  fi
+  info "${C_BOLD}▶ $LAB_ID: $TITLE${C_RESET}"
+  dc up -d --wait
+  echo
+  info "起動しました。課題を確認しましょう:  lab mission ${LAB_ID%%-*}"
+  if [ -d "$LAB_DIR/files" ]; then
+    info "編集できる設定ファイル:            ${LAB_RUNTIME#"$LAB_ROOT"/}/"
+  fi
+}
+
+cmd_mission() {
+  load_lab "$1"
+  cat "$LAB_DIR/MISSION.md"
+}
+
+cmd_break() {
+  load_lab "$1"
+  require_running
+  [ -f "$LAB_DIR/break.sh" ] || die "このラボには break.sh がありません"
+  bash "$LAB_DIR/break.sh" "${2:-}"
+  touch "$LAB_RUNTIME/.broken"
+  echo
+  info "${C_YELLOW}💥 何かが壊れました。原因を調査して直してください。${C_RESET}"
+  info "   直せたら:  lab check ${LAB_ID%%-*}"
+  info "   困ったら:  lab hint ${LAB_ID%%-*}"
+}
+
+cmd_check() {
+  load_lab "$1"
+  require_running
+  info "${C_BOLD}▶ $LAB_ID を検証中...${C_RESET}"
+  if bash "$LAB_DIR/verify.sh"; then
+    if [ -f "$LAB_RUNTIME/.broken" ]; then
+      progress_add "$LAB_ID:fixed"
+      rm -f "$LAB_RUNTIME/.broken"
+      info "🎉 障害を復旧しました！ 振り返りを journal/ に書いておきましょう。"
+    elif [ "$TYPE" = "build" ]; then
+      progress_add "$LAB_ID:built"
+      info "🎉 構築完了！ 次は lab break ${LAB_ID%%-*} で壊してみましょう。"
+    else
+      info "正常に動作しています。lab break ${LAB_ID%%-*} で障害を起こしてみましょう。"
+    fi
+  else
+    return 1
+  fi
+}
+
+cmd_hint() {
+  load_lab "$1"
+  local n="${2:-1}"
+  local out
+  out="$(awk -v n="$n" '
+    /^## / { count++; if (count == n) { show = 1; print; next } else if (show) { exit } }
+    show { print }
+  ' "$LAB_DIR/HINTS.md")"
+  [ -n "$out" ] || die "ヒント $n はありません"
+  echo "$out"
+  local total
+  total="$(grep -c '^## ' "$LAB_DIR/HINTS.md")"
+  if [ "$n" -lt "$total" ]; then
+    echo
+    info "(次のヒント: lab hint ${LAB_ID%%-*} $((n + 1))  / 全 $total 個)"
+  fi
+}
+
+cmd_shell() {
+  load_lab "$1"
+  require_running
+  local svc="${2:-}"
+  if [ -z "$svc" ]; then
+    info "サービスを指定してください:"
+    dc ps --services | sed 's/^/  /'
+    exit 1
+  fi
+  dc exec "$svc" sh -c 'command -v bash >/dev/null && exec bash || exec sh'
+}
+
+cmd_status() {
+  load_lab "$1"
+  dc ps
+}
+
+cmd_logs() {
+  load_lab "$1"
+  shift
+  dc logs --tail 100 "$@"
+}
+
+# 解答を適用する (自動テスト用。ヘルプには載せない)
+cmd_solve() {
+  load_lab "$1"
+  require_running
+  [ -f "$LAB_DIR/solution/apply.sh" ] || die "このラボには solution/apply.sh がありません"
+  bash "$LAB_DIR/solution/apply.sh"
+}
+
+cmd_dc() {
+  load_lab "$1"
+  shift
+  dc "$@"
+}
+
+cmd_stop() {
+  load_lab "$1"
+  dc down -v --remove-orphans
+  rm -rf "$LAB_RUNTIME"
+}
+
+cmd_reset() {
+  cmd_stop "$1"
+  cmd_start "$1"
+}
+
+cmd_progress() {
+  local d total=0 done=0
+  for d in "$LABS_DIR"/*/; do
+    d="$(basename "$d")"
+    [[ "$d" == _* ]] && continue
+    TYPE="break-fix"
+    # shellcheck source=/dev/null
+    source "$LABS_DIR/$d/lab.conf"
+    total=$((total + 1))
+    if { [ "$TYPE" = "build" ] && progress_has "$d:built"; } || progress_has "$d:fixed"; then
+      done=$((done + 1))
+    fi
+  done
+  info "クリア: $done / $total"
+  cmd_list
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    list | ls) cmd_list ;;
+    start) cmd_start "${1:-}" ;;
+    mission) cmd_mission "${1:-}" ;;
+    break) cmd_break "${1:-}" "${2:-}" ;;
+    check) cmd_check "${1:-}" ;;
+    hint) cmd_hint "${1:-}" "${2:-}" ;;
+    shell | sh) cmd_shell "${1:-}" "${2:-}" ;;
+    status | ps) cmd_status "${1:-}" ;;
+    logs) cmd_logs "$@" ;;
+    dc | compose) cmd_dc "$@" ;;
+    reset) cmd_reset "${1:-}" ;;
+    stop | down) cmd_stop "${1:-}" ;;
+    progress) cmd_progress ;;
+    solve) cmd_solve "${1:-}" ;;
+    "" | -h | --help | help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

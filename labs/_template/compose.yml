@@ -1,0 +1,20 @@
+# ラボNN: <タイトル>
+#
+# 構成図をここに書く
+#
+# ルール:
+#   - サブネットはラボ番号から決める (ラボ NN なら 10.1NN.x.0/24) — 同時起動しても衝突しない
+#   - ホストへポートを公開する場合は必ず 127.0.0.1 に限定する
+#   - 調査用コンテナには nicolaka/netshoot を使う (ip, tcpdump, nmap, dig, curl 等が入っている)
+
+services:
+  client:
+    image: nicolaka/netshoot:v0.13
+    command: ["sleep", "infinity"]
+    networks: [net]
+
+networks:
+  net:
+    ipam:
+      config:
+        - subnet: 10.199.0.0/24

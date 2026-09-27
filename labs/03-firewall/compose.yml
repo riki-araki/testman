@@ -1,0 +1,56 @@
+# ラボ03: ホストファイアウォール (iptables) を設計する
+#
+#   client (10.103.0.20) ──┐
+#                          ├── dmz ── web (10.103.0.10)  :80 公開サイト / :8080 管理画面
+#   admin  (10.103.0.30) ──┘           └ fw (web と同じネットワーク名前空間で iptables を操作)
+#
+# AWS で言えば「EC2 にアタッチするセキュリティグループを設計する」構成。
+
+services:
+  web:
+    image: nginx:1.27-alpine
+    hostname: web
+    volumes:
+      - ${LAB_RUNTIME:?lab コマンド経由で起動してください}/nginx:/etc/nginx/conf.d
+    networks:
+      dmz:
+        ipv4_address: 10.103.0.10
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 2s
+      retries: 10
+
+  # web コンテナと「同じネットワーク名前空間」を共有するサイドカー。
+  # ここで iptables を設定すると web への通信に適用される (Kubernetes の Pod と同じ仕組み)。
+  fw:
+    image: nicolaka/netshoot:v0.13
+    network_mode: "service:web"
+    cap_add: [NET_ADMIN]
+    volumes:
+      - ${LAB_RUNTIME}/firewall:/firewall
+    command: ["sleep", "infinity"]
+    depends_on:
+      web:
+        condition: service_healthy
+
+  client:
+    image: nicolaka/netshoot:v0.13
+    hostname: client
+    command: ["sleep", "infinity"]
+    networks:
+      dmz:
+        ipv4_address: 10.103.0.20
+
+  admin:
+    image: nicolaka/netshoot:v0.13
+    hostname: admin
+    command: ["sleep", "infinity"]
+    networks:
+      dmz:
+        ipv4_address: 10.103.0.30
+
+networks:
+  dmz:
+    ipam:
+      config:
+        - subnet: 10.103.0.0/24

@@ -1,0 +1,3 @@
+# docker compose exec に渡すコマンドは意図的にシングルクォートで囲む (コンテナ内で展開させる)
+disable=SC2016
+source-path=SCRIPTDIR

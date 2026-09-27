@@ -1,0 +1,69 @@
+# ラボ01: 2つのネットワークをルーターでつなぐ
+#
+#   client (10.101.1.10) ── lan_a ── router ── lan_b ── server (10.101.2.10)
+#                                 .1.254  .2.254
+#
+# AWS で言えば「別サブネットにある EC2 同士をルートテーブルで接続する」構成。
+
+x-tools: &tools
+  image: nicolaka/netshoot:v0.13
+  cap_add: [NET_ADMIN]
+
+services:
+  client:
+    <<: *tools
+    hostname: client
+    networks:
+      lan_a:
+        ipv4_address: 10.101.1.10
+    # デフォルトルート (Docker ホスト行き) を消して「プライベートサブネット」にし、
+    # lan_b 行きは router を経由させる
+    command: ["sh", "-c", "ip route del default; ip route add 10.101.2.0/24 via 10.101.1.254 && exec sleep infinity"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ip route | grep -q 10.101.2.0/24"]
+      interval: 2s
+      retries: 10
+
+  router:
+    <<: *tools
+    hostname: router
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks:
+      lan_a:
+        ipv4_address: 10.101.1.254
+      lan_b:
+        ipv4_address: 10.101.2.254
+    command: ["sleep", "infinity"]
+
+  server:
+    image: nginx:1.27-alpine
+    hostname: server
+    cap_add: [NET_ADMIN]
+    networks:
+      lan_b:
+        ipv4_address: 10.101.2.10
+    # 戻りの通信 (lan_a 行き) も router を経由させる
+    command: ["sh", "-c", "ip route del default; ip route add 10.101.1.0/24 via 10.101.2.254 && exec nginx -g 'daemon off;'"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ip route | grep -q 10.101.1.0/24"]
+      interval: 2s
+      retries: 10
+
+networks:
+  lan_a:
+    driver_opts:
+      com.docker.network.bridge.name: lab01-a
+      # Docker 28+ は「別ブリッジから来たコンテナ宛パケット」を破棄する (direct routing 保護)。
+      # router 経由の転送を許可するため、相手側ブリッジを信頼済みにする。
+      com.docker.network.bridge.trusted_host_interfaces: lab01-b
+    ipam:
+      config:
+        - subnet: 10.101.1.0/24
+  lan_b:
+    driver_opts:
+      com.docker.network.bridge.name: lab01-b
+      com.docker.network.bridge.trusted_host_interfaces: lab01-a
+    ipam:
+      config:
+        - subnet: 10.101.2.0/24
